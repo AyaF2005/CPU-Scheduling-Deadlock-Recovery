@@ -1,0 +1,219 @@
+with Deadlock
+import heapq
+from collections import deque, defaultdict
+import re
+
+class Process:
+    def __init__(self, pid, arrival_time, priority, bursts):
+        self.pid = pid
+        self.arrival_time = arrival_time
+        self.priority = priority
+        self.bursts = deque(bursts)
+        self.wait_time = 0
+        self.turnaround_time = 0
+        self.resources_held = set()  # Resources currently held by this process
+
+    def __lt__(self, other):
+        if self.priority == other.priority:
+            return self.arrival_time < other.arrival_time
+        return self.priority < other.priority
+
+class CPUScheduler:
+    def __init__(self, time_quantum):
+        self.current_time = 0
+        self.time_quantum = time_quantum
+        self.ready_queue = []
+        self.io_queue = deque()
+        self.gantt_chart = []
+        self.completed_processes = []
+        self.resources = defaultdict(set)  # Tracks which process holds which resource
+        self.waiting_queue = defaultdict(list)  # Tracks processes waiting for a resource
+
+    def parse_input(self, filename):
+        """Parse the input file for processes."""
+        with open(filename, 'r') as file:
+            for line in file:
+                parts = line.strip().split(maxsplit=3)
+                pid, arrival_time, priority, bursts_str = (
+                    int(parts[0]), int(parts[1]), int(parts[2]), parts[3]
+                )
+                bursts = []
+                pattern = re.compile(r"(CPU|IO)\{([^}]*)\}")
+                matches = pattern.findall(bursts_str)
+                for burst_type, burst_content in matches:
+                    if burst_type == "CPU":
+                        subtokens = burst_content.split(", ")
+                        for subtoken in subtokens:
+                            if subtoken.startswith("R[") or subtoken.startswith("F["):
+                                bursts.append(subtoken)
+                            else:
+                                bursts.append(int(subtoken))
+                    elif burst_type == "IO":
+                        bursts.append(int(burst_content))
+                process = Process(pid, arrival_time, priority, bursts)
+                heapq.heappush(self.ready_queue, (arrival_time, priority, process))
+
+    def detect_deadlock(self):
+        """Detect deadlock using a wait-for graph."""
+        wait_for_graph = defaultdict(set)  # Build the wait-for graph
+        for resource, waiting_processes in self.waiting_queue.items():
+            for process in waiting_processes:
+                for holder_pid in self.resources[resource]:
+                    wait_for_graph[process.pid].add(holder_pid)
+
+        visited = set()
+        recursion_stack = set()
+
+        def dfs(process_id):
+            if process_id in recursion_stack:
+                return True  # Cycle detected
+            if process_id in visited:
+                return False
+            visited.add(process_id)
+            recursion_stack.add(process_id)
+            for dependent_pid in wait_for_graph[process_id]:
+                if dfs(dependent_pid):
+                    return True
+            recursion_stack.remove(process_id)
+            return False
+
+        for pid in list(wait_for_graph.keys()):
+            if dfs(pid):
+                return True, set(wait_for_graph.keys())
+        return False, set()
+
+    def handle_deadlock(self, deadlocked_processes):
+        """Handle deadlock by preempting resources from the process with the highest PID."""
+        process_to_preempt = max(deadlocked_processes)  # Choose the process with the highest PID
+        print(f"Time {self.current_time}: Preempting resources held by process P{process_to_preempt} to resolve deadlock.")
+
+        preempted_process = None
+        for _, _, process in self.ready_queue:
+            if process.pid == process_to_preempt:
+                preempted_process = process
+                break
+        if not preempted_process:
+            for resource, waiting_processes in self.waiting_queue.items():
+                for process in waiting_processes:
+                    if process.pid == process_to_preempt:
+                        preempted_process = process
+                        break
+
+        if preempted_process:
+            for resource in list(preempted_process.resources_held):
+                print(f"Time {self.current_time}: Resource R[{resource}] preempted from P{process_to_preempt}.")
+                if process_to_preempt in self.resources[resource]:
+                    self.resources[resource].remove(process_to_preempt)
+                preempted_process.resources_held.remove(resource)
+
+                # Assign the resource to the next waiting process
+                if self.waiting_queue[resource]:
+                    next_process = self.waiting_queue[resource].pop(0)
+                    print(f"Time {self.current_time}: Resource R[{resource}] granted to P{next_process.pid}.")
+                    self.resources[resource].add(next_process.pid)
+                    next_process.resources_held.add(resource)
+                    heapq.heappush(self.ready_queue, (self.current_time, next_process.priority, next_process))
+
+            heapq.heappush(self.ready_queue, (self.current_time, preempted_process.priority, preempted_process))
+            print(f"Time {self.current_time}: Process P{process_to_preempt} is rescheduled with its remaining bursts.")
+
+    def simulate(self):
+        while self.ready_queue or self.io_queue:
+            # Move IO processes back to ready queue when IO completes
+            while self.io_queue and self.io_queue[0][0] <= self.current_time:
+                _, process = self.io_queue.popleft()
+                heapq.heappush(self.ready_queue, (self.current_time, process.priority, process))
+
+            if self.ready_queue:
+                _, _, process = heapq.heappop(self.ready_queue)
+
+                if process.bursts:
+                    burst = process.bursts.popleft()
+
+                    if isinstance(burst, str):  # Resource request or release
+                        if burst.startswith("R["):  # Resource request
+                            resource = int(burst[2:-1])
+                            if self.resources[resource]:  # Resource is held
+                                print(f"Time {self.current_time}: Process P{process.pid} waiting for resource R[{resource}].")
+                                self.waiting_queue[resource].append(process)
+
+                                # Trigger Deadlock Detection
+                                deadlocked, deadlocked_processes = self.detect_deadlock()
+                                if deadlocked:
+                                    print(f"Time {self.current_time}: Deadlock detected among processes {deadlocked_processes}.")
+                                    self.handle_deadlock(deadlocked_processes)
+                            else:  # Resource is free
+                                print(f"Time {self.current_time}: Process P{process.pid} acquired resource R[{resource}].")
+                                self.resources[resource].add(process.pid)
+                                process.resources_held.add(resource)
+                                heapq.heappush(self.ready_queue, (self.current_time, process.priority, process))
+                        elif burst.startswith("F["):  # Resource release
+                            resource = int(burst[2:-1])
+                            if resource in process.resources_held:
+                                print(f"Time {self.current_time}: Process P{process.pid} releasing resource R[{resource}].")
+                                self.resources[resource].remove(process.pid)
+                                process.resources_held.remove(resource)
+
+                                # Assign resource to the next waiting process
+                                if self.waiting_queue[resource]:
+                                    next_process = self.waiting_queue[resource].pop(0)
+                                    print(f"Time {self.current_time}: Resource R[{resource}] granted to P{next_process.pid}.")
+                                    self.resources[resource].add(next_process.pid)
+                                    next_process.resources_held.add(resource)
+                                    heapq.heappush(self.ready_queue, (self.current_time, next_process.priority, next_process))
+                            else:
+                                print(f"Time {self.current_time}: Warning! Process P{process.pid} attempted to release unheld resource R[{resource}].")
+
+                    else:  # CPU or IO burst
+                        execution_time = min(burst, self.time_quantum)
+                        print(f"Time {self.current_time}: Process P{process.pid} executing CPU burst of {execution_time}.")
+                        self.gantt_chart.append((self.current_time, process.pid, execution_time))
+                        self.current_time += execution_time
+                        burst -= execution_time
+
+                        # Update waiting times for all other processes
+                        for _, _, p in self.ready_queue:
+                            p.wait_time += execution_time
+
+                        for io_time, p in self.io_queue:
+                            if io_time > self.current_time:
+                                p.wait_time += execution_time
+
+                        if burst > 0:
+                            process.bursts.appendleft(burst)
+                            heapq.heappush(self.ready_queue, (self.current_time, process.priority, process))
+                        elif process.bursts:
+                            next_burst = process.bursts.popleft()
+                            if isinstance(next_burst, int):  # IO burst
+                                print(f"Time {self.current_time}: Process P{process.pid} performing IO for {next_burst}.")
+                                self.io_queue.append((self.current_time + next_burst, process))
+                            else:
+                                process.bursts.appendleft(next_burst)
+                                heapq.heappush(self.ready_queue, (self.current_time, process.priority, process))
+                        else:
+                            process.turnaround_time = self.current_time - process.arrival_time
+                            print(f"Time {self.current_time}: Process P{process.pid} completed.")
+                            self.completed_processes.append(process)
+            else:  # CPU idle
+                if self.io_queue:
+                    self.current_time = self.io_queue[0][0]
+                else:
+                    break
+
+    def display_results(self):
+        print("\nGantt Chart:")
+        for start_time, pid, duration in self.gantt_chart:
+            print(f"P{pid} ({start_time}-{start_time + duration})")
+
+        total_waiting_time = sum(p.wait_time for p in self.completed_processes)
+        total_turnaround_time = sum(p.turnaround_time for p in self.completed_processes)
+        n = len(self.completed_processes)
+        print(f"\nAverage Waiting Time: {total_waiting_time / n if n > 0 else 0:.2f}")
+        print(f"Average Turnaround Time: {total_turnaround_time / n if n > 0 else 0:.2f}")
+
+if __name__ == "__main__":
+    scheduler = CPUScheduler(time_quantum=10)
+    input_file = "process_input.txt"  # Replace with your input file path
+    scheduler.parse_input(input_file)
+    scheduler.simulate()
+    scheduler.display_results()

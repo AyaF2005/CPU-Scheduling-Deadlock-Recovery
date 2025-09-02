@@ -1,0 +1,183 @@
+Scheduling
+import heapq
+from collections import deque, defaultdict
+
+# Class to represent a process
+class Process:
+    def __init__(self, id, arrival, prio, bursts):
+        self.id = id
+        self.arrival = arrival
+        self.prio = prio
+        self.bursts = deque(bursts)
+        self.wait_time = 0
+        self.turnaround_time = 0
+        self.remaining_time = sum(burst if isinstance(burst, int) else 0 for burst in bursts)
+        self.resources_held = set()
+
+    def __lt__(self, other):
+        if self.prio == other.prio:
+            return self.arrival < other.arrival
+        return self.prio < other.prio
+
+# Class to handle CPU scheduling
+class CPUScheduler:
+    def __init__(self, time_slice):
+        self.time = 0
+        self.time_slice = time_slice
+        self.ready_queue = []
+        self.io_queue = deque()
+        self.gantt_chart = []
+        self.done_processes = []
+        self.resources = defaultdict(set)  # Tracks resources held by processes
+        self.waiting_queue = defaultdict(list)  # Tracks waiting processes for resources
+
+    # Function to read input file and create processes
+    def parse_input(self, filename):
+        with open(filename, 'r') as file:
+            for line in file:
+                parts = line.strip().split(maxsplit=3)
+                id, arrival, prio, bursts_str = (
+                    int(parts[0]), int(parts[1]), int(parts[2]), parts[3]
+                )
+                bursts = []
+                for item in bursts_str.split():
+                    item = item.strip()
+                    if item.startswith("CPU{") and item.endswith("}"):
+                        bursts.append(int(item[4:-1]))
+                    elif item.startswith("IO{") and item.endswith("}"):
+                        bursts.append(int(item[3:-1]))
+                    elif item.startswith("R[") and item.endswith("]"):  # Resource request
+                        bursts.append(item)
+                    elif item.startswith("F[") and item.endswith("]"):  # Resource release
+                        bursts.append(item)
+                    else:
+                        raise ValueError(f"Invalid burst format: {item}")
+                process = Process(id, arrival, prio, bursts)
+                heapq.heappush(self.ready_queue, (arrival, prio, process))
+
+    # Function to detect deadlock
+    def detect_deadlock(self):
+        """Detect circular wait in the system."""
+        wait_for = defaultdict(set)  # Tracks which processes wait for which resources
+
+        # Build wait-for graph
+        for resource, waiting in self.waiting_queue.items():
+            for process in waiting:
+                for id in self.resources[resource]:
+                    wait_for[process.id].add(id)
+
+        visited = set()
+        rec_stack = set()
+
+        def dfs(id):
+            if id in rec_stack:
+                return True
+            if id in visited:
+                return False
+            visited.add(id)
+            rec_stack.add(id)
+            for waiting_id in wait_for[id]:
+                if dfs(waiting_id):
+                    return True
+            rec_stack.remove(id)
+            return False
+
+        for id in wait_for:
+            if dfs(id):
+                return True, set(wait_for.keys())
+        return False, set()
+
+    # Function to handle deadlock by terminating a process
+    def handle_deadlock(self, deadlocked_processes):
+        """Terminate a process to resolve the deadlock."""
+        print(f"Deadlocked processes: {', '.join(f'P{id}' for id in deadlocked_processes)}")
+        to_terminate = max(deadlocked_processes)
+        print(f"Time {self.time}: Terminating process P{to_terminate} to resolve deadlock.")
+
+        # Release resources held by the terminated process
+        terminated_process = None
+        for _, _, process in self.ready_queue:
+            if process.id == to_terminate:
+                terminated_process = process
+                break
+
+        if terminated_process:
+            for resource in terminated_process.resources_held:
+                self.resources[resource].remove(to_terminate)
+                if self.waiting_queue[resource]:
+                    next_process = self.waiting_queue[resource].pop(0)
+                    print(f"Time {self.time}: Granting resource R[{resource}] to P{next_process.id}.")
+                    self.resources[resource].add(next_process.id)
+                    next_process.resources_held.add(resource)
+                    heapq.heappush(self.ready_queue, (self.time, next_process.prio, next_process))
+            self.ready_queue = [(t, p.prio, p) for t, _, p in self.ready_queue if p.id != to_terminate]
+            heapq.heapify(self.ready_queue)
+
+    # Function to simulate the CPU scheduling
+    def simulate(self):
+        last_active_time = defaultdict(int)  # Tracks the last time a process was active
+
+        while self.ready_queue or self.io_queue:
+            while self.io_queue and self.io_queue[0][0] <= self.time:
+                _, process = self.io_queue.popleft()
+                heapq.heappush(self.ready_queue, (self.time, process.prio, process))
+
+            if self.ready_queue:
+                _, _, process = heapq.heappop(self.ready_queue)
+                if process.bursts:
+                    burst = process.bursts.popleft()
+
+                    if isinstance(burst, int):  # CPU burst
+                        execution_time = min(burst, self.time_slice)
+                        if process.id in last_active_time:
+                            process.wait_time += self.time - last_active_time[process.id]
+                        print(f"Time {self.time}: Process P{process.id} executing CPU burst of {execution_time}.")
+                        self.gantt_chart.append((self.time, process.id, execution_time))
+                        self.time += execution_time
+                        last_active_time[process.id] = self.time
+                        burst -= execution_time
+
+                        if burst > 0:  # Burst not completed
+                            process.bursts.appendleft(burst)
+                            heapq.heappush(self.ready_queue, (self.time, process.prio, process))
+                        elif process.bursts:
+                            next_burst = process.bursts.popleft()
+                            if isinstance(next_burst, int):  # IO burst
+                                print(f"Time {self.time}: Process P{process.id} performing IO for {next_burst}.")
+                                self.io_queue.append((self.time + next_burst, process))
+                            else:
+                                process.bursts.appendleft(next_burst)
+                                heapq.heappush(self.ready_queue, (self.time, process.prio, process))
+                        else:  # Process completed
+                            process.turnaround_time = self.time - process.arrival
+                            print(f"Time {self.time}: Process P{process.id} completed.")
+                            self.done_processes.append(process)
+
+            else:  # CPU idle
+                next_event_time = float('inf')
+                if self.io_queue:
+                    next_event_time = self.io_queue[0][0]
+                idle_time = next_event_time - self.time
+                print(f"Time {self.time}: CPU idle for {idle_time} units.")
+                self.gantt_chart.append((self.time, "idle", idle_time))
+                self.time = next_event_time
+
+    # Function to display the results
+    def display_results(self):
+        print("\nGantt Chart:")
+        for start_time, id, duration in self.gantt_chart:
+            print(f"P{id} ({start_time}-{start_time + duration})")
+
+        total_waiting_time = sum(p.wait_time for p in self.done_processes)
+        total_turnaround_time = sum(p.turnaround_time for p in self.done_processes)
+        n = len(self.done_processes)
+        print(f"\nAverage Waiting Time: {total_waiting_time / n if n > 0 else 0:.2f}")
+        print(f"Average Turnaround Time: {total_turnaround_time / n if n > 0 else 0:.2f}")
+
+# Main function to run the scheduler
+if __name__ == "__main__":
+    scheduler = CPUScheduler(time_slice=10)
+    input_file = "process_input.txt"
+    scheduler.parse_input(input_file)
+    scheduler.simulate()
+    scheduler.display_results()
